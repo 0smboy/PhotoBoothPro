@@ -1,0 +1,29 @@
+## macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+## Xcode
+build/
+DerivedData/
+*.xcodeproj/
+!*.xcodeproj/project.pbxproj
+!*.xcodeproj/xcshareddata/
+*.xcworkspace/xcuserdata/
+xcuserdata/
+*.moved-aside
+*.xcuserstate
+*.hmap
+*.ipa
+
+## Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+## xcodegen generated
+PhotoBoothPro.xcodeproj/
+
+## Env / secrets
+.env
+*.local
