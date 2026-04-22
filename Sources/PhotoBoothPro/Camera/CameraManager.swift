@@ -2,6 +2,7 @@ import Foundation
 import AVFoundation
 import AppKit
 import CoreImage
+import CoreImage.CIFilterBuiltins
 import CoreVideo
 import Observation
 
@@ -41,6 +42,25 @@ final class CameraManager: NSObject {
 
     /// Screen-flash behavior for capture.
     var flashMode: FlashMode = .auto
+
+    /// While true, the published preview frames become a solid white image
+    /// instead of the camera feed. Driven by ContentView around a capture so
+    /// the screen actually emits white light (the "flash"). We do it here —
+    /// rather than with a SwiftUI `Color.white` overlay — because MTKView
+    /// (AppKit) always draws on top of SwiftUI overlays, so an overlay-based
+    /// flash would be invisible on screen and fail to illuminate the subject.
+    var isFlashing: Bool = false
+
+    /// Rolling estimate of the scene's perceptual brightness in [0, 1],
+    /// computed every ~10 frames with `CIAreaAverage`. Used by the Auto
+    /// flash mode since macOS `AVCaptureDevice` doesn't expose ISO/exposure.
+    var sceneBrightness: Double = 0.5
+
+    /// Below this average luminance, `.auto` treats the scene as dim and
+    /// fires the screen flash. Roughly "obviously indoors at night".
+    private let lowLightBrightnessThreshold: Double = 0.30
+
+    private var brightnessSampleCounter = 0
 
     private let ciContext = CIContext(options: [
         .useSoftwareRenderer: false,
@@ -250,7 +270,7 @@ final class CameraManager: NSObject {
         switch flashMode {
         case .off:  return false
         case .on:   return true
-        case .auto: return false   // no reliable low-light metric on macOS
+        case .auto: return sceneBrightness < lowLightBrightnessThreshold
         }
     }
 }
@@ -266,9 +286,49 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
         guard let buffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let source = CIImage(cvPixelBuffer: buffer)
 
-        Task { @MainActor in
-            FrameBroadcaster.shared.publish(source)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+
+            // Rolling scene-brightness sample (~ every 10 frames). Uses
+            // `CIAreaAverage` to produce a single RGBA pixel whose value is
+            // the average of the whole frame, then converts to luminance.
+            self.brightnessSampleCounter &+= 1
+            if self.brightnessSampleCounter % 10 == 0 {
+                self.updateSceneBrightness(from: source)
+            }
+
+            let out: CIImage
+            if self.isFlashing {
+                out = CIImage(color: CIColor.white).cropped(to: source.extent)
+            } else {
+                out = source
+            }
+            FrameBroadcaster.shared.publish(out)
         }
+    }
+
+    private func updateSceneBrightness(from image: CIImage) {
+        let filter = CIFilter.areaAverage()
+        filter.inputImage = image
+        filter.extent = image.extent
+        guard let avg = filter.outputImage else { return }
+
+        var pixel = [UInt8](repeating: 0, count: 4)
+        ciContext.render(
+            avg,
+            toBitmap: &pixel,
+            rowBytes: 4,
+            bounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+            format: .RGBA8,
+            colorSpace: CGColorSpaceCreateDeviceRGB()
+        )
+        // Rec. 709 luma.
+        let r = Double(pixel[0]) / 255.0
+        let g = Double(pixel[1]) / 255.0
+        let b = Double(pixel[2]) / 255.0
+        let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b
+        // Lightly smoothed so a single dark frame doesn't flip the mode.
+        sceneBrightness = sceneBrightness * 0.6 + luma * 0.4
     }
 }
 

@@ -58,7 +58,7 @@ struct SettingsView: View {
                     }
                 }
 
-                Text("Stored at ~/Library/Application Support/PhotoBoothPro/config.plist (chmod 0600). Model: `openai/gpt-5.4-image-2`.")
+                Text("Stored at ~/Library/Application Support/PhotoBoothPro/config.plist (chmod 0600). Model: `google/gemini-2.5-flash-image` (~10-15s per edit).")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

@@ -3,6 +3,10 @@ import SwiftUI
 /// 3-state cycling button for flash mode: Off → Auto → On → Off.
 struct FlashModeButton: View {
     @Binding var mode: FlashMode
+    /// Live [0,1] brightness estimate; drives the small dot next to "Auto"
+    /// so the user can tell whether Auto is currently going to fire.
+    var sceneBrightness: Double = 0.5
+    var autoThreshold: Double = 0.30
 
     var body: some View {
         Button {
@@ -16,6 +20,11 @@ struct FlashModeButton: View {
                     .contentTransition(.symbolEffect(.replace))
                 Text(label)
                     .font(.system(size: 12, weight: .medium))
+                if mode == .auto {
+                    Circle()
+                        .fill(autoWillFire ? Color.yellow : Color.white.opacity(0.35))
+                        .frame(width: 6, height: 6)
+                }
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
@@ -27,7 +36,21 @@ struct FlashModeButton: View {
             )
         }
         .buttonStyle(.plain)
-        .help(mode.label)
+        .help(tooltip)
+    }
+
+    private var autoWillFire: Bool { sceneBrightness < autoThreshold }
+
+    private var tooltip: String {
+        switch mode {
+        case .off:  return "Screen flash off"
+        case .on:   return "Screen flash on"
+        case .auto:
+            let pct = Int(round(sceneBrightness * 100))
+            return autoWillFire
+                ? "Auto — will fire (scene ~\(pct)% brightness)"
+                : "Auto — won't fire (scene ~\(pct)% brightness)"
+        }
     }
 
     private var label: String {

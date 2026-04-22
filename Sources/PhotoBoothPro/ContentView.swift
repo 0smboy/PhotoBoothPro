@@ -10,7 +10,6 @@ struct ContentView: View {
     @State private var busy = false
     @State private var toast: Toast?
     @State private var dismissTask: Task<Void, Never>?
-    @State private var isFlashing = false
 
     @State private var recordingStart: Date?
     @State private var recordingTick: TimeInterval = 0
@@ -53,9 +52,6 @@ struct ContentView: View {
                 .transition(.move(edge: .top).combined(with: .opacity))
                 .zIndex(20)
             }
-
-            FlashOverlay(isActive: isFlashing)
-                .zIndex(30)
         }
         .frame(minWidth: 860, minHeight: 620)
         .task { await camera.bootstrap() }
@@ -89,13 +85,13 @@ struct ContentView: View {
                 CameraPreviewView(camera: camera)
                     .overlay(alignment: .topTrailing) {
                         if !isIdentity(effect) {
-                            Label(effect.displayName, systemImage: "sparkles")
-                                .font(.system(size: 11, weight: .semibold))
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background(Capsule().fill(effect.accentColor.opacity(0.9)))
-                                .foregroundStyle(.white)
-                                .padding(14)
+                            ActiveEffectBadge(effect: effect) {
+                                withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
+                                    effect = .normal
+                                    camera.effect = .normal
+                                }
+                            }
+                            .padding(14)
                         }
                     }
                     .overlay(alignment: .topLeading) {
@@ -163,10 +159,13 @@ struct ContentView: View {
                 set: { camera.isMirrored = $0 }
             ))
 
-            FlashModeButton(mode: Binding(
-                get: { camera.flashMode },
-                set: { camera.flashMode = $0 }
-            ))
+            FlashModeButton(
+                mode: Binding(
+                    get: { camera.flashMode },
+                    set: { camera.flashMode = $0 }
+                ),
+                sceneBrightness: camera.sceneBrightness
+            )
 
             Spacer()
 
@@ -232,13 +231,17 @@ struct ContentView: View {
             defer { Task { @MainActor in busy = false } }
             let fireFlash = camera.shouldFireFlash
             if fireFlash {
-                withAnimation(.easeOut(duration: 0.06)) { isFlashing = true }
-                try? await Task.sleep(nanoseconds: 120_000_000)
+                // Turn the preview into a solid-white frame so the screen
+                // physically lights up the subject. Give the camera's
+                // auto-exposure a moment to adapt before we snap.
+                camera.isFlashing = true
+                try? await Task.sleep(nanoseconds: 250_000_000)
             }
             do {
                 let pngData = try await camera.capturePhoto()
                 if fireFlash {
-                    withAnimation(.easeIn(duration: 0.22)) { isFlashing = false }
+                    try? await Task.sleep(nanoseconds: 120_000_000)
+                    camera.isFlashing = false
                 }
 
                 if !effect.isAI {
@@ -272,9 +275,7 @@ struct ContentView: View {
                     }
                 }
             } catch {
-                if fireFlash {
-                    withAnimation(.easeIn(duration: 0.22)) { isFlashing = false }
-                }
+                if fireFlash { camera.isFlashing = false }
                 present(.init(message: error.localizedDescription, kind: .error))
             }
         }

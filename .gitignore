@@ -27,3 +27,7 @@ PhotoBoothPro.xcodeproj/
 ## Env / secrets
 .env
 *.local
+
+## local test secrets
+/tmp/pbp-*
+

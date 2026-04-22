@@ -22,6 +22,10 @@ struct EffectTileView: View {
                     .stroke(isSelected ? effect.accentColor : .white.opacity(0.06),
                             lineWidth: isSelected ? 3 : 1)
             )
+            // Force the whole aspect-ratio rectangle to be the button's
+            // hit region. Without this, only the label pill is hittable on
+            // local-filter tiles because the live MTKView child declines hits.
+            .contentShape(Rectangle())
             .shadow(color: isSelected ? effect.accentColor.opacity(0.35) : .clear,
                     radius: isSelected ? 8 : 0)
             .scaleEffect(isSelected ? 1.02 : 1.0)

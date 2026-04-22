@@ -58,7 +58,7 @@ struct OnboardingView: View {
                      destination: URL(string: "https://openrouter.ai/keys")!)
                     .font(.system(size: 11))
 
-                Text("Saved locally at ~/Library/Application Support/PhotoBoothPro/config.plist (chmod 0600). Model: `openai/gpt-5.4-image-2`.")
+                Text("Saved at ~/Library/Application Support/PhotoBoothPro/config.plist (chmod 0600). Uses `google/gemini-2.5-flash-image` — ~10-15s per edit.")
                     .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)

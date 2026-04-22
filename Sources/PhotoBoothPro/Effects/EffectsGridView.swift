@@ -15,30 +15,20 @@ struct EffectsGridView: View {
     ]
 
     var body: some View {
-        ZStack(alignment: .topTrailing) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    header
-                    filtersSection
-                    if advancedAIEnabled {
-                        aiSection
-                    }
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                header
+                filtersSection
+                if advancedAIEnabled {
+                    aiSection
                 }
-                .padding(24)
             }
-
-            Button(action: onClose) {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 22))
-                    .foregroundStyle(.white.opacity(0.85), .black.opacity(0.5))
-            }
-            .buttonStyle(.plain)
-            .padding(14)
-            .help("Close Effects (Esc)")
+            .padding(24)
         }
         .background(.black.opacity(0.55))
         .background(.ultraThinMaterial)
         .transition(.opacity.combined(with: .scale(scale: 0.98)))
+        // Dismissal: pick any tile → auto-close, or press Esc.
     }
 
     private var header: some View {
@@ -61,7 +51,6 @@ struct EffectsGridView: View {
             .tint(.pink)
             .help("Enable slow, server-side AI style transfers")
         }
-        .padding(.trailing, 40)   // leave room for the close button
     }
 
     private var filtersSection: some View {
@@ -82,6 +71,7 @@ struct EffectsGridView: View {
                         withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
                             selection = eff
                         }
+                        onClose()
                     }
                 }
             }
@@ -111,6 +101,7 @@ struct EffectsGridView: View {
                         withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
                             selection = eff
                         }
+                        onClose()
                     }
                 }
             }

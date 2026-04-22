@@ -21,11 +21,15 @@ enum OpenRouterError: LocalizedError {
 }
 
 /// Calls OpenRouter's `/chat/completions` with an image-capable model.
-/// Default: `openai/gpt-5.4-image-2` (GPT-5.4 multimodal with GPT Image 2
-/// generation). OpenRouter doesn't expose a separate `/images/edits` endpoint
-/// — image edits go through chat completions with `modalities: ["image","text"]`.
+///
+/// Default: `google/gemini-2.5-flash-image` (Nano Banana). Measured ~10-15s
+/// per edit, vs. ~150s for `openai/gpt-5.4-image-2` — both go through the
+/// same OpenRouter endpoint, so latency is entirely upstream.
+///
+/// OpenRouter doesn't expose a separate `/images/edits` endpoint — image
+/// edits go through chat completions with `modalities: ["image","text"]`.
 struct OpenRouterImageClient {
-    var model: String = "openai/gpt-5.4-image-2"
+    var model: String = "google/gemini-2.5-flash-image"
     var session: URLSession
 
     init(session: URLSession = .shared) {

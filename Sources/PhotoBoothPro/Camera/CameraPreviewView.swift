@@ -55,6 +55,13 @@ final class FilteredMetalPreview: NSView {
         metalView?.frame = bounds
     }
 
+    /// Decline all mouse hit-testing. This view and its MTKView child are
+    /// purely visual; if we don't opt out, AppKit's default hitTest returns
+    /// the MTKView for clicks in its bounds, which eats the tap that a
+    /// wrapping SwiftUI `Button` is supposed to receive (the Effects-grid
+    /// tile bug). Returning nil makes the view click-through.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
     private func setup() {
         wantsLayer = true
         layer?.backgroundColor = NSColor.black.cgColor
