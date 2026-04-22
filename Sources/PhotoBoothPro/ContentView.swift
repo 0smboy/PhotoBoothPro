@@ -10,8 +10,11 @@ struct ContentView: View {
     @State private var busy = false
     @State private var toast: Toast?
     @State private var dismissTask: Task<Void, Never>?
+    @State private var isFlashing = false
 
-    private let aiClient = OpenAIImageClient()
+    @State private var recordingStart: Date?
+    @State private var recordingTick: TimeInterval = 0
+    @State private var recordingTimer: Task<Void, Never>?
 
     var body: some View {
         ZStack {
@@ -25,9 +28,14 @@ struct ContentView: View {
 
             if showingEffects {
                 EffectsGridView(
-                    selection: $effect,
-                    session: camera.session,
-                    isMirrored: camera.isMirrored
+                    selection: Binding(
+                        get: { effect },
+                        set: { newValue in
+                            effect = newValue
+                            camera.effect = newValue
+                        }
+                    ),
+                    camera: camera
                 ) {
                     withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                         showingEffects = false
@@ -45,10 +53,16 @@ struct ContentView: View {
                 .transition(.move(edge: .top).combined(with: .opacity))
                 .zIndex(20)
             }
+
+            FlashOverlay(isActive: isFlashing)
+                .zIndex(30)
         }
         .frame(minWidth: 860, minHeight: 620)
-        .task { await bootstrapCamera() }
-        .onDisappear { camera.stop() }
+        .task { await camera.bootstrap() }
+        .onDisappear {
+            camera.stop()
+            recordingTimer?.cancel()
+        }
         .sheet(isPresented: $showingOnboarding) {
             OnboardingView { key in
                 APIKeyStore.save(key)
@@ -62,7 +76,8 @@ struct ContentView: View {
         }
         .background(KeyShortcuts(
             takePhoto: { takePhoto() },
-            toggleEffects: { toggleEffects() }
+            toggleEffects: { toggleEffects() },
+            toggleRecording: { toggleRecording() }
         ))
     }
 
@@ -71,18 +86,32 @@ struct ContentView: View {
     private var previewArea: some View {
         ZStack {
             if camera.authorization == .authorized {
-                CameraPreviewView(session: camera.session, isMirrored: camera.isMirrored)
+                CameraPreviewView(camera: camera)
                     .overlay(alignment: .topTrailing) {
-                        if effect != .normal {
+                        if !isIdentity(effect) {
                             Label(effect.displayName, systemImage: "sparkles")
                                 .font(.system(size: 11, weight: .semibold))
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 4)
-                                .background(
-                                    Capsule().fill(effect.accentColor.opacity(0.9))
-                                )
+                                .background(Capsule().fill(effect.accentColor.opacity(0.9)))
                                 .foregroundStyle(.white)
                                 .padding(14)
+                        }
+                    }
+                    .overlay(alignment: .topLeading) {
+                        if camera.isRecording {
+                            HStack(spacing: 6) {
+                                Circle()
+                                    .fill(.red)
+                                    .frame(width: 8, height: 8)
+                                Text("REC \(Self.timeString(recordingTick))")
+                                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                            }
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Capsule().fill(.black.opacity(0.6)))
+                            .padding(14)
                         }
                     }
                     .overlay {
@@ -128,13 +157,26 @@ struct ContentView: View {
     }
 
     private var bottomBar: some View {
-        HStack {
+        HStack(spacing: 10) {
             MirrorModeToggle(isMirrored: Binding(
                 get: { camera.isMirrored },
                 set: { camera.isMirrored = $0 }
             ))
 
+            FlashModeButton(mode: Binding(
+                get: { camera.flashMode },
+                set: { camera.flashMode = $0 }
+            ))
+
             Spacer()
+
+            RecordButton(
+                isRecording: camera.isRecording,
+                isDisabled: busy || camera.authorization != .authorized,
+                duration: camera.isRecording ? recordingTick : nil
+            ) {
+                toggleRecording()
+            }
 
             ShutterButton(isBusy: busy) {
                 takePhoto()
@@ -171,16 +213,6 @@ struct ContentView: View {
 
     // MARK: - Actions
 
-    private func bootstrapCamera() async {
-        await camera.bootstrap()
-        if camera.authorization == .authorized,
-           APIKeyStore.load() == nil {
-            // Nudge user to add key the first time
-            try? await Task.sleep(nanoseconds: 400_000_000)
-            showingOnboarding = true
-        }
-    }
-
     private func toggleEffects() {
         withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
             showingEffects.toggle()
@@ -189,24 +221,32 @@ struct ContentView: View {
 
     private func takePhoto() {
         guard !busy, camera.authorization == .authorized else { return }
-        if effect.isAI, APIKeyStore.load() == nil {
+        if effect.isAI, !ImageEditService.isAvailable() {
             showingOnboarding = true
             return
         }
+        if camera.isRecording { return }
 
         busy = true
         Task {
             defer { Task { @MainActor in busy = false } }
+            let fireFlash = camera.shouldFireFlash
+            if fireFlash {
+                withAnimation(.easeOut(duration: 0.06)) { isFlashing = true }
+                try? await Task.sleep(nanoseconds: 120_000_000)
+            }
             do {
                 let pngData = try await camera.capturePhoto()
+                if fireFlash {
+                    withAnimation(.easeIn(duration: 0.22)) { isFlashing = false }
+                }
 
-                if effect == .normal {
-                    let item = store.save(pngData: pngData, effect: .normal)
+                if !effect.isAI {
+                    store.save(pngData: pngData, effect: effect)
                     present(.init(
                         message: "Saved to \(store.directoryURL.lastPathComponent)",
                         kind: .success
                     ))
-                    _ = item
                 } else {
                     guard let prompt = effect.prompt else { return }
                     let placeholderID = store.insertProcessing(
@@ -215,7 +255,7 @@ struct ContentView: View {
                     )
                     Task.detached {
                         do {
-                            let styled = try await aiClient.edit(imageData: pngData, prompt: prompt)
+                            let styled = try await ImageEditService.edit(imageData: pngData, prompt: prompt)
                             await MainActor.run {
                                 store.complete(id: placeholderID, pngData: styled)
                                 present(.init(
@@ -228,6 +268,41 @@ struct ContentView: View {
                                 store.fail(id: placeholderID, message: error.localizedDescription)
                                 present(.init(message: error.localizedDescription, kind: .error))
                             }
+                        }
+                    }
+                }
+            } catch {
+                if fireFlash {
+                    withAnimation(.easeIn(duration: 0.22)) { isFlashing = false }
+                }
+                present(.init(message: error.localizedDescription, kind: .error))
+            }
+        }
+    }
+
+    private func toggleRecording() {
+        guard camera.authorization == .authorized else { return }
+        if camera.isRecording {
+            recordingTimer?.cancel(); recordingTimer = nil
+            Task {
+                do {
+                    let url = try await camera.stopRecording()
+                    store.saveVideo(from: url, effect: effect)
+                    present(.init(message: "Video saved", kind: .success))
+                } catch {
+                    present(.init(message: error.localizedDescription, kind: .error))
+                }
+            }
+        } else {
+            do {
+                try camera.startRecording()
+                recordingStart = Date()
+                recordingTick = 0
+                recordingTimer = Task { @MainActor in
+                    while !Task.isCancelled, camera.isRecording {
+                        try? await Task.sleep(nanoseconds: 250_000_000)
+                        if let start = recordingStart {
+                            recordingTick = Date().timeIntervalSince(start)
                         }
                     }
                 }
@@ -247,12 +322,22 @@ struct ContentView: View {
             }
         }
     }
+
+    private func isIdentity(_ e: Effect) -> Bool {
+        if case .local(.none) = e { return true }
+        return false
+    }
+
+    private static func timeString(_ t: TimeInterval) -> String {
+        let total = Int(t)
+        return String(format: "%02d:%02d", total / 60, total % 60)
+    }
 }
 
-/// Invisible view that wires up keyboard shortcuts without needing a menu.
 private struct KeyShortcuts: View {
     let takePhoto: () -> Void
     let toggleEffects: () -> Void
+    let toggleRecording: () -> Void
 
     var body: some View {
         ZStack {
@@ -261,6 +346,9 @@ private struct KeyShortcuts: View {
                 .hidden()
             Button(action: toggleEffects) { EmptyView() }
                 .keyboardShortcut("e", modifiers: [])
+                .hidden()
+            Button(action: toggleRecording) { EmptyView() }
+                .keyboardShortcut("r", modifiers: [.command])
                 .hidden()
         }
         .frame(width: 0, height: 0)

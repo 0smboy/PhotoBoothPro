@@ -20,12 +20,22 @@ struct PhotoGalleryStrip: View {
                                     lineWidth: store.selectedID == item.id ? 2 : 1
                                 )
                         )
-                        .onTapGesture { store.selectedID = item.id }
+                        .onTapGesture {
+                            store.selectedID = item.id
+                            if item.kind == .video, item.state == .ready {
+                                store.openExternally(id: item.id)
+                            }
+                        }
                         .contextMenu {
                             Button("Show in Finder") { store.revealInFinder(id: item.id) }
                                 .disabled(item.url == nil)
-                            Button("Copy") { store.copyToClipboard(id: item.id) }
-                                .disabled(item.url == nil)
+                            if item.kind == .video {
+                                Button("Open") { store.openExternally(id: item.id) }
+                                    .disabled(item.url == nil)
+                            } else {
+                                Button("Copy") { store.copyToClipboard(id: item.id) }
+                                    .disabled(item.url == nil)
+                            }
                             Divider()
                             Button("Delete", role: .destructive) { store.remove(id: item.id) }
                         }
@@ -46,7 +56,7 @@ struct PhotoGalleryStrip: View {
                     .resizable()
                     .scaledToFill()
             } else {
-                Image(systemName: "photo")
+                Image(systemName: item.kind == .video ? "video" : "photo")
                     .foregroundStyle(.white.opacity(0.4))
                     .font(.system(size: 22))
             }
@@ -82,8 +92,16 @@ struct PhotoGalleryStrip: View {
                 EmptyView()
             }
 
+            // Video play badge
+            if item.kind == .video, item.state == .ready {
+                Image(systemName: "play.circle.fill")
+                    .font(.system(size: 26))
+                    .foregroundStyle(.white.opacity(0.92), .black.opacity(0.35))
+                    .shadow(color: .black.opacity(0.45), radius: 4)
+            }
+
             // Effect badge
-            if item.effect != .normal, item.state == .ready {
+            if !isIdentity(item.effect), item.state == .ready {
                 VStack {
                     HStack {
                         Spacer()
@@ -99,5 +117,10 @@ struct PhotoGalleryStrip: View {
                 }
             }
         }
+    }
+
+    private func isIdentity(_ e: Effect) -> Bool {
+        if case .local(.none) = e { return true }
+        return false
     }
 }

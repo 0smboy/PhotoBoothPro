@@ -1,63 +1,127 @@
 # PhotoBooth Pro
 
-一款 macOS 原生相机应用，类似 Photo Booth，但有两点关键差异：
+<p align="left">
+  <img src="Sources/PhotoBoothPro/Assets.xcassets/AppIcon.appiconset/icon_256x256.png" alt="App icon" width="128" height="128">
+</p>
 
-- **非镜像 (WYSIWYG)**：预览和保存的照片都是他人视角，抬右手屏幕里也在右侧。
-- **AI Effects**：去除原有本地滤镜，只保留 Normal，加入 4 种由 OpenAI `gpt-image-1` 驱动的艺术风格：
-  - 吉卜力 (Ghibli)
-  - 动漫 (Anime)
-  - 油画 (Oil Painting)
-  - 像素风 (Pixel Art)
+A native macOS photo booth app with two key differences from Apple's stock one:
 
-## 构建与运行
+- **Non-mirrored by default is a toggle.** Mirror (classic webcam) is the
+  default, but you can flip to WYSIWYG (others' POV) with one click in the
+  bottom toolbar. Both preview and captured photos/videos honor the choice.
+- **AI Effects.** On top of 10 real-time Core Image filters (Mono, Noir,
+  Chrome, Sepia, Vivid, Thermal, X-Ray, Comic, Invert, Pixellate), four slow
+  server-side styles are available behind an **Advanced** toggle:
+  Ghibli / Anime / Oil Painting / Pixel Art.
 
-### 1. 前置依赖
+Plus: screen-flash, video recording, session gallery.
 
-- macOS 14+
-- Xcode 15+
-- [xcodegen](https://github.com/yonaskolb/XcodeGen)
+## Why it exists
+
+Apple's Photo Booth is frozen in amber. This one is a tiny SwiftUI app that:
+
+- Runs a **Core Image** filter graph on every camera frame (GPU, ~60 fps).
+- Ships a live filter preview per tile in the Effects grid.
+- For AI styles, posts `chat/completions` to
+  [OpenRouter](https://openrouter.ai) with
+  `model: openai/gpt-5.4-image-2` (GPT Image 2), and falls back to the local
+  `codex` CLI when you don't have an OpenRouter key.
+- Never opens the macOS Keychain; keys go into a plain plist file you can
+  `rm` at any time.
+
+## Build & run
 
 ```bash
 brew install xcodegen
-```
-
-### 2. 生成 Xcode 工程
-
-```bash
-cd /Users/oboy/myClaudeProject
+git clone https://github.com/0smboy/PhotoBoothPro.git
+cd PhotoBoothPro
 xcodegen
 open PhotoBoothPro.xcodeproj
+# Cmd+R in Xcode
 ```
 
-### 3. 运行
+### Enabling AI styles
 
-在 Xcode 中按 `Cmd+R`。首次启动：
+You have two options:
 
-1. 系统会请求摄像头权限 → 允许。
-2. App 会弹出 onboarding，输入你的 OpenAI API key（以 `sk-` 开头）。Key 保存在 macOS Keychain。
+1. **OpenRouter (recommended, fast ~15-30s)**
+   - Grab a key at <https://openrouter.ai/keys>.
+   - Paste it into the onboarding sheet or `Cmd+,` → Settings.
+   - Saved to `~/Library/Application Support/PhotoBoothPro/config.plist`
+     (chmod 0600). Or export `$OPENROUTER_API_KEY` in your shell.
+2. **Codex CLI fallback (slow 2-5 min)**
+   - `brew install codex && codex login`
+   - Used automatically when no OpenRouter key is configured.
 
-## 使用
+Real-time filters work with no key. If you just want Mono / Thermal /
+Comic etc., you can skip the whole AI section.
 
-- 中间红色按钮拍照。
-- 右下 **Effects** 打开风格面板，点击某个风格 tile 切换。
-- 选中 AI 风格后拍照，画面上会有 shimmer 动画，约 5-15 秒后风格化照片出现在底部胶片栏。
-- 照片保存位置：`~/Pictures/PhotoBoothPro/`
-- `Cmd+,` 打开设置可更换 API key。
+## Controls
 
-## 架构
+| Shortcut | Action |
+| --- | --- |
+| `Space` | Take photo |
+| `⌘R` | Start / stop recording |
+| `E` | Toggle Effects panel |
+| `Esc` | Close Effects panel |
+| `⌘,` | Open Settings |
+
+## Output
+
+All captures land in `~/Pictures/PhotoBoothPro/`.
+
+- Photos: `photoboothpro-<timestamp>-<effect>.png`
+- Videos: `photoboothpro-<timestamp>-<effect>.mov` (raw mirrored feed,
+  filter not baked in yet — v2 will use AVAssetWriter for filtered video).
+
+## Architecture
 
 ```
 Sources/PhotoBoothPro/
-├── Camera/       AVFoundation 捕捉层（非镜像）
-├── Effects/      Normal + 4 种 AI 风格定义
-├── AI/           OpenAI 客户端 + Keychain
-├── Gallery/      会话照片存储
-├── UI/           原子 UI 组件
-└── ContentView.swift  主界面
+├── Camera/
+│   ├── CameraManager.swift        AVCaptureSession + CIFilter pipeline + recording
+│   ├── CameraPreviewView.swift    MTKView-backed Core Image renderer
+│   ├── FrameBroadcaster.swift     fan-out so every tile can show its own live filter
+│   ├── FlashMode.swift
+│   └── PhotoCaptureDelegate.swift
+├── Effects/
+│   ├── Effect.swift               `Effect = .local(LocalFilter) | .ai(AIStyle)`
+│   ├── StylePrompts.swift
+│   ├── EffectsGridView.swift      Advanced toggle gates AI tiles
+│   └── EffectTileView.swift       per-tile live filtered preview
+├── AI/
+│   ├── ImageEditService.swift     facade: OpenRouter first, codex fallback
+│   ├── OpenRouterImageClient.swift
+│   ├── CodexImageClient.swift
+│   ├── CodexAvailability.swift
+│   └── APIKeyStore.swift          plist, NOT Keychain
+├── Gallery/                        PhotoStore + PhotoItem + strip view
+├── UI/                             Onboarding, Settings, shutter, record, mirror, flash…
+├── ContentView.swift               top-level wiring
+└── PhotoBoothProApp.swift
 ```
 
-## 技术说明
+## Tech notes
 
-- 非镜像实现：`AVCaptureVideoPreviewLayer.connection.isVideoMirrored = false`
-- AI 后端：`POST https://api.openai.com/v1/images/edits` with `model=gpt-image-1`
-- 无第三方 Swift 依赖，仅使用系统 framework
+- **Mirror** is applied via `CIImage.transformed(by: scaleX: -1)` on
+  captured photos (so preview + capture stay in lockstep) and via
+  `AVCaptureConnection.isVideoMirrored` on the recording output.
+- **AI backend** goes through OpenRouter's
+  `/api/v1/chat/completions` with `modalities: ["image", "text"]`; the
+  response's `choices[0].message.images[0].image_url.url` is a
+  `data:image/png;base64,…` URL that we decode straight into
+  `PhotoStore`.
+- **App Sandbox is off** so `Process` can spawn the fallback `codex` CLI.
+  Camera and microphone entitlements are declared; mic access is requested
+  lazily (recording stays silent if denied, no crash).
+- No third-party Swift deps — only system frameworks.
+
+## Roadmap
+
+- [ ] AVAssetWriter-based filtered video recording
+- [ ] Per-effect photo strip (4-up classic Photo Booth layout)
+- [ ] More local filters (dot screen, edge work, sketch)
+
+## License
+
+MIT.

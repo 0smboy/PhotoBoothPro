@@ -1,49 +1,86 @@
 import Foundation
 import AVFoundation
 import AppKit
+import CoreImage
+import CoreVideo
 import Observation
 
+/// Pipes camera frames through a Core Image filter and exposes the latest
+/// filtered CIImage to whoever wants to render it (the MTKView preview + the
+/// still capture pipeline). Recording uses AVCaptureMovieFileOutput for v1
+/// (raw frames, mirror honored via the connection).
 @MainActor
 @Observable
-final class CameraManager {
+final class CameraManager: NSObject {
     let session = AVCaptureSession()
 
+    // MARK: Outputs
     private let photoOutput = AVCapturePhotoOutput()
+    private let videoDataOutput = AVCaptureVideoDataOutput()
+    private let movieOutput = AVCaptureMovieFileOutput()
+
     private let sessionQueue = DispatchQueue(label: "com.photoboothpro.session")
+    private let videoQueue  = DispatchQueue(label: "com.photoboothpro.video")
 
-    /// Strong ref to the delegate used by the current in-flight capture.
-    private var activeDelegate: PhotoCaptureDelegate?
+    /// Strong ref to the delegates used by current in-flight operations.
+    private var activePhotoDelegate: PhotoCaptureDelegate?
+    private var recordingContinuation: CheckedContinuation<URL, Error>?
 
+    // MARK: Published state
     var isConfigured = false
     var authorization: AVAuthorizationStatus = AVCaptureDevice.authorizationStatus(for: .video)
     var errorMessage: String?
+    var isRecording: Bool = false
 
     /// When true, preview and captured photos are horizontally flipped (classic
-    /// Photo Booth / mirror). When false, WYSIWYG / third-person view.
-    var isMirrored: Bool = false
+    /// Photo Booth / mirror). macOS webcam default.
+    var isMirrored: Bool = true
 
-    // MARK: - Lifecycle
+    /// Active filter. Setting this updates the preview instantly (next frame).
+    var effect: Effect = .normal
+
+    /// Screen-flash behavior for capture.
+    var flashMode: FlashMode = .auto
+
+    private let ciContext = CIContext(options: [
+        .useSoftwareRenderer: false,
+        .cacheIntermediates: true
+    ])
+
+    // MARK: Lifecycle
+
+    private var hasMicrophonePermission = false
 
     func bootstrap() async {
         authorization = AVCaptureDevice.authorizationStatus(for: .video)
-
         if authorization == .notDetermined {
             let granted = await AVCaptureDevice.requestAccess(for: .video)
             authorization = granted ? .authorized : .denied
         }
-
         guard authorization == .authorized else {
             errorMessage = CameraError.notAuthorized.localizedDescription
             return
         }
 
-        await configure()
+        // Ask for mic permission up front; if denied, video records silent.
+        // We MUST NOT add an audio input without permission — macOS aborts.
+        let micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+        switch micStatus {
+        case .authorized:
+            hasMicrophonePermission = true
+        case .notDetermined:
+            hasMicrophonePermission = await AVCaptureDevice.requestAccess(for: .audio)
+        default:
+            hasMicrophonePermission = false
+        }
+
+        await configure(withAudio: hasMicrophonePermission)
         start()
     }
 
-    private func configure() async {
+    private func configure(withAudio includeAudio: Bool) async {
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-            sessionQueue.async { [weak self] in
+            sessionQueue.async { [weak self, includeAudio] in
                 guard let self else { cont.resume(); return }
                 self.session.beginConfiguration()
                 self.session.sessionPreset = .high
@@ -53,6 +90,7 @@ final class CameraManager {
                     cont.resume()
                 }
 
+                // --- Inputs ---
                 let discovery = AVCaptureDevice.DiscoverySession(
                     deviceTypes: [.builtInWideAngleCamera, .external],
                     mediaType: .video,
@@ -62,26 +100,48 @@ final class CameraManager {
                     Task { @MainActor in self.errorMessage = CameraError.noDevice.localizedDescription }
                     return
                 }
-
                 do {
-                    let input = try AVCaptureDeviceInput(device: device)
-                    if self.session.canAddInput(input) { self.session.addInput(input) }
+                    let videoInput = try AVCaptureDeviceInput(device: device)
+                    if self.session.canAddInput(videoInput) { self.session.addInput(videoInput) }
                 } catch {
                     Task { @MainActor in self.errorMessage = error.localizedDescription }
                     return
                 }
 
+                // Audio input — ONLY if the user has actively granted
+                // microphone permission. Adding an audio device input without
+                // it crashes the session (EXC_BAD_INSTRUCTION from caulk).
+                if includeAudio,
+                   let audioDevice = AVCaptureDevice.default(for: .audio),
+                   let audioInput = try? AVCaptureDeviceInput(device: audioDevice),
+                   self.session.canAddInput(audioInput) {
+                    self.session.addInput(audioInput)
+                }
+
+                // --- Outputs ---
                 if self.session.canAddOutput(self.photoOutput) {
                     self.session.addOutput(self.photoOutput)
                     self.photoOutput.maxPhotoQualityPrioritization = .quality
                 }
 
-                // Force non-mirrored output on every connection.
-                for connection in self.photoOutput.connections {
-                    if connection.isVideoMirroringSupported {
-                        connection.automaticallyAdjustsVideoMirroring = false
-                        connection.isVideoMirrored = false
-                    }
+                self.videoDataOutput.alwaysDiscardsLateVideoFrames = true
+                self.videoDataOutput.videoSettings = [
+                    kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+                ]
+                self.videoDataOutput.setSampleBufferDelegate(self, queue: self.videoQueue)
+                if self.session.canAddOutput(self.videoDataOutput) {
+                    self.session.addOutput(self.videoDataOutput)
+                }
+
+                if self.session.canAddOutput(self.movieOutput) {
+                    self.session.addOutput(self.movieOutput)
+                }
+
+                // Photo output: we burn mirroring in by ourselves on capture.
+                for connection in self.photoOutput.connections
+                where connection.isVideoMirroringSupported {
+                    connection.automaticallyAdjustsVideoMirroring = false
+                    connection.isVideoMirrored = false
                 }
 
                 Task { @MainActor in self.isConfigured = true }
@@ -101,15 +161,16 @@ final class CameraManager {
         }
     }
 
-    // MARK: - Capture
+    // MARK: Photo capture
 
-    /// Capture a still photo. Returns PNG-encoded data honoring `isMirrored`.
+    /// Capture a still photo. Returns PNG-encoded data with the current
+    /// filter + mirror baked in.
     func capturePhoto() async throws -> Data {
         guard authorization == .authorized, isConfigured else {
             throw CameraError.notAuthorized
         }
-
-        let mirror = isMirrored  // snapshot on main actor
+        let mirror = isMirrored
+        let effectSnapshot = effect
 
         let rawData: Data = try await withCheckedThrowingContinuation { cont in
             sessionQueue.async { [weak self] in
@@ -118,32 +179,117 @@ final class CameraManager {
                 settings.photoQualityPrioritization = .quality
 
                 let delegate = PhotoCaptureDelegate(continuation: cont)
-                Task { @MainActor in self.activeDelegate = delegate }
-
-                if let connection = self.photoOutput.connection(with: .video),
-                   connection.isVideoMirroringSupported {
-                    connection.automaticallyAdjustsVideoMirroring = false
-                    connection.isVideoMirrored = mirror
-                }
+                Task { @MainActor in self.activePhotoDelegate = delegate }
 
                 self.photoOutput.capturePhoto(with: settings, delegate: delegate)
             }
         }
-        activeDelegate = nil
-        return try Self.convertToPNG(rawData)
+        self.activePhotoDelegate = nil
+        return try encodePhoto(rawData: rawData, effect: effectSnapshot, mirror: mirror)
     }
 
-    // MARK: - Helpers
-
-    static func convertToPNG(_ data: Data) throws -> Data {
-        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
-              let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+    /// Apply the current filter + mirror to a raw capture and return PNG bytes.
+    private func encodePhoto(rawData: Data, effect: Effect, mirror: Bool) throws -> Data {
+        guard let source = CGImageSourceCreateWithData(rawData as CFData, nil),
+              let cg = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
             throw CameraError.invalidImage
         }
-        let rep = NSBitmapImageRep(cgImage: cgImage)
+
+        var ci = CIImage(cgImage: cg)
+        ci = effect.apply(to: ci)
+        if mirror {
+            let flip = CGAffineTransform(scaleX: -1, y: 1)
+                .translatedBy(x: -ci.extent.width, y: 0)
+            ci = ci.transformed(by: flip)
+        }
+
+        let renderExtent = ci.extent.integral
+        guard let outCG = ciContext.createCGImage(ci, from: renderExtent) else {
+            throw CameraError.invalidImage
+        }
+        let rep = NSBitmapImageRep(cgImage: outCG)
         guard let png = rep.representation(using: .png, properties: [:]) else {
             throw CameraError.invalidImage
         }
         return png
+    }
+
+    // MARK: Recording
+
+    /// Starts movie recording; returns when the recording actually begins.
+    /// Call `stopRecording()` to finalize; the file URL is returned there.
+    func startRecording() throws {
+        guard !isRecording else { return }
+        guard let connection = movieOutput.connection(with: .video) else {
+            throw CameraError.invalidImage
+        }
+        if connection.isVideoMirroringSupported {
+            connection.automaticallyAdjustsVideoMirroring = false
+            connection.isVideoMirrored = isMirrored
+        }
+
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("photoboothpro-\(UUID().uuidString).mov")
+        isRecording = true
+        movieOutput.startRecording(to: tempURL, recordingDelegate: self)
+    }
+
+    /// Stops recording and returns the resulting file URL.
+    func stopRecording() async throws -> URL {
+        guard isRecording else { throw CameraError.invalidImage }
+        return try await withCheckedThrowingContinuation { cont in
+            self.recordingContinuation = cont
+            self.movieOutput.stopRecording()
+        }
+    }
+
+    // MARK: Helpers for UI
+
+    /// Whether a screen-flash should fire for the next capture given current mode + scene.
+    var shouldFireFlash: Bool {
+        switch flashMode {
+        case .off:  return false
+        case .on:   return true
+        case .auto: return false   // no reliable low-light metric on macOS
+        }
+    }
+}
+
+// MARK: - AVCaptureVideoDataOutputSampleBufferDelegate
+
+extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
+    nonisolated func captureOutput(
+        _ output: AVCaptureOutput,
+        didOutput sampleBuffer: CMSampleBuffer,
+        from connection: AVCaptureConnection
+    ) {
+        guard let buffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        let source = CIImage(cvPixelBuffer: buffer)
+
+        Task { @MainActor in
+            FrameBroadcaster.shared.publish(source)
+        }
+    }
+}
+
+// MARK: - AVCaptureFileOutputRecordingDelegate
+
+extension CameraManager: AVCaptureFileOutputRecordingDelegate {
+    nonisolated func fileOutput(
+        _ output: AVCaptureFileOutput,
+        didFinishRecordingTo outputFileURL: URL,
+        from connections: [AVCaptureConnection],
+        error: Error?
+    ) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.isRecording = false
+            if let error {
+                self.recordingContinuation?.resume(throwing: error)
+            } else {
+                self.recordingContinuation?.resume(returning: outputFileURL)
+            }
+            self.recordingContinuation = nil
+        }
     }
 }

@@ -8,6 +8,10 @@
 	<string>PhotoBooth Pro</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIconName</key>
+	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
 	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 	<key>CFBundleInfoDictionaryVersion</key>
@@ -31,5 +35,7 @@
 	<string>PhotoBooth Pro needs camera access to capture your photos.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>PhotoBooth Pro records audio alongside video when you use the Record button.</string>
 </dict>
 </plist>

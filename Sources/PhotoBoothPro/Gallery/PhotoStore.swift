@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import AVFoundation
 import Observation
 
 @MainActor
@@ -23,16 +24,42 @@ final class PhotoStore {
 
     // MARK: - Public API
 
-    /// Save a ready-to-disk PNG; returns the inserted item.
     @discardableResult
     func save(pngData: Data, effect: Effect) -> PhotoItem {
-        let item = persistItem(pngData: pngData, effect: effect)
+        let item = persistPhoto(pngData: pngData, effect: effect)
         items.insert(item, at: 0)
         selectedID = item.id
         return item
     }
 
-    /// Insert a placeholder item (AI processing). Returns its id for later updates.
+    /// Copy a finished movie file into our output dir and register it.
+    @discardableResult
+    func saveVideo(from sourceURL: URL, effect: Effect) -> PhotoItem {
+        let name = defaultName(effect: effect, ext: "mov")
+        let dest = outputDirectory.appendingPathComponent(name)
+        try? FileManager.default.removeItem(at: dest)
+        var finalURL: URL? = nil
+        do {
+            try FileManager.default.moveItem(at: sourceURL, to: dest)
+            finalURL = dest
+        } catch {
+            // Fallback: keep the temp url
+            finalURL = sourceURL
+        }
+
+        let thumb = Self.generateThumbnail(for: finalURL ?? sourceURL)
+        let item = PhotoItem(
+            url: finalURL,
+            kind: .video,
+            effect: effect,
+            state: .ready,
+            thumbnail: thumb
+        )
+        items.insert(item, at: 0)
+        selectedID = item.id
+        return item
+    }
+
     func insertProcessing(effect: Effect, originalThumbnail: NSImage?) -> UUID {
         let item = PhotoItem(
             effect: effect,
@@ -44,7 +71,6 @@ final class PhotoStore {
         return item.id
     }
 
-    /// Replace a placeholder item with final PNG data.
     func complete(id: UUID, pngData: Data) {
         guard let idx = items.firstIndex(where: { $0.id == id }) else { return }
         let effect = items[idx].effect
@@ -75,19 +101,27 @@ final class PhotoStore {
 
     func copyToClipboard(id: UUID) {
         guard
-            let url = items.first(where: { $0.id == id })?.url,
+            let item = items.first(where: { $0.id == id }),
+            item.kind == .photo,
+            let url = item.url,
             let image = NSImage(contentsOf: url)
         else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.writeObjects([image])
     }
 
+    func openExternally(id: UUID) {
+        guard let url = items.first(where: { $0.id == id })?.url else { return }
+        NSWorkspace.shared.open(url)
+    }
+
     // MARK: - Private
 
-    private func persistItem(pngData: Data, effect: Effect) -> PhotoItem {
+    private func persistPhoto(pngData: Data, effect: Effect) -> PhotoItem {
         let url = writeFile(pngData: pngData, effect: effect)
         return PhotoItem(
             url: url,
+            kind: .photo,
             effect: effect,
             state: .ready,
             thumbnail: NSImage(data: pngData)
@@ -95,15 +129,30 @@ final class PhotoStore {
     }
 
     private func writeFile(pngData: Data, effect: Effect) -> URL? {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyyMMdd-HHmmss-SSS"
-        let name = "photoboothpro-\(formatter.string(from: Date()))-\(effect.fileSuffix).png"
-        let url = outputDirectory.appendingPathComponent(name)
+        let url = outputDirectory.appendingPathComponent(defaultName(effect: effect, ext: "png"))
         do {
             try pngData.write(to: url, options: .atomic)
             return url
         } catch {
             return nil
         }
+    }
+
+    private func defaultName(effect: Effect, ext: String) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd-HHmmss-SSS"
+        return "photoboothpro-\(formatter.string(from: Date()))-\(effect.fileSuffix).\(ext)"
+    }
+
+    private static func generateThumbnail(for url: URL) -> NSImage? {
+        let asset = AVURLAsset(url: url)
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = CGSize(width: 360, height: 270)
+        let time = CMTime(seconds: 0.1, preferredTimescale: 600)
+        if let cg = try? generator.copyCGImage(at: time, actualTime: nil) {
+            return NSImage(cgImage: cg, size: .zero)
+        }
+        return nil
     }
 }
