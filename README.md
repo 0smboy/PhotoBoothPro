@@ -29,7 +29,21 @@ Apple's Photo Booth is frozen in amber. This one is a tiny SwiftUI app that:
 - Never opens the macOS Keychain; keys go into a plain plist file you can
   `rm` at any time.
 
-## Build & run
+## Install
+
+### Homebrew (easiest)
+
+```bash
+brew install --cask 0smboy/tap/photoboothpro
+```
+
+Ad-hoc signed, so Gatekeeper will gate the first launch. Right-click → **Open**, or:
+
+```bash
+xattr -cr /Applications/PhotoBoothPro.app
+```
+
+### From source
 
 ```bash
 brew install xcodegen
