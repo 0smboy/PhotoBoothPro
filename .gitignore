@@ -28,6 +28,12 @@ PhotoBoothPro.xcodeproj/
 .env
 *.local
 
+## Stray runtime config from local MCP skills — not part of the app
+/config/
+
+## local test secrets
+/tmp/pbp-*
+
 ## local test secrets
 /tmp/pbp-*
 

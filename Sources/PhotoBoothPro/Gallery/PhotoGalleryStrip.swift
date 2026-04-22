@@ -3,6 +3,9 @@ import AppKit
 
 struct PhotoGalleryStrip: View {
     @Bindable var store: PhotoStore
+    /// Tapping a ready thumbnail calls this so the host can open an in-app
+    /// viewer. Processing / failed placeholders just get selected.
+    var onOpen: (PhotoItem) -> Void = { _ in }
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -22,15 +25,17 @@ struct PhotoGalleryStrip: View {
                         )
                         .onTapGesture {
                             store.selectedID = item.id
-                            if item.kind == .video, item.state == .ready {
-                                store.openExternally(id: item.id)
+                            if item.state == .ready {
+                                onOpen(item)
                             }
                         }
                         .contextMenu {
+                            Button("Open") { onOpen(item) }
+                                .disabled(item.state != .ready)
                             Button("Show in Finder") { store.revealInFinder(id: item.id) }
                                 .disabled(item.url == nil)
                             if item.kind == .video {
-                                Button("Open") { store.openExternally(id: item.id) }
+                                Button("Open externally") { store.openExternally(id: item.id) }
                                     .disabled(item.url == nil)
                             } else {
                                 Button("Copy") { store.copyToClipboard(id: item.id) }

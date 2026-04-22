@@ -11,9 +11,24 @@ struct ContentView: View {
     @State private var toast: Toast?
     @State private var dismissTask: Task<Void, Never>?
 
+    @State private var viewingID: UUID?
+
+    @AppStorage("captureMode") private var captureModeRaw: String = CaptureMode.photo.rawValue
+    @State private var countdownValue: Int?
+    @State private var countdownTask: Task<Void, Never>?
+
     @State private var recordingStart: Date?
     @State private var recordingTick: TimeInterval = 0
     @State private var recordingTimer: Task<Void, Never>?
+
+    private var captureMode: CaptureMode {
+        get { CaptureMode(rawValue: captureModeRaw) ?? .photo }
+        nonmutating set { captureModeRaw = newValue.rawValue }
+    }
+
+    /// Hide the gallery + bottom toolbar during a countdown so the preview
+    /// fills the window, matching Photo Booth.
+    private var isInCountdown: Bool { countdownValue != nil }
 
     var body: some View {
         ZStack {
@@ -21,8 +36,12 @@ struct ContentView: View {
 
             VStack(spacing: 0) {
                 previewArea
-                gallerySection
-                bottomBar
+                if !isInCountdown {
+                    gallerySection
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                    bottomBar
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
             }
 
             if showingEffects {
@@ -52,6 +71,19 @@ struct ContentView: View {
                 .transition(.move(edge: .top).combined(with: .opacity))
                 .zIndex(20)
             }
+
+            if viewingID != nil {
+                MediaViewerView(
+                    store: store,
+                    currentID: $viewingID
+                ) {
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        viewingID = nil
+                    }
+                }
+                .transition(.opacity)
+                .zIndex(40)
+            }
         }
         .frame(minWidth: 860, minHeight: 620)
         .task { await camera.bootstrap() }
@@ -66,14 +98,17 @@ struct ContentView: View {
             }
         }
         .onExitCommand {
-            if showingEffects {
+            if viewingID != nil {
+                withAnimation(.easeOut(duration: 0.2)) { viewingID = nil }
+            } else if countdownValue != nil {
+                cancelCountdown()
+            } else if showingEffects {
                 withAnimation { showingEffects = false }
             }
         }
         .background(KeyShortcuts(
-            takePhoto: { takePhoto() },
-            toggleEffects: { toggleEffects() },
-            toggleRecording: { toggleRecording() }
+            primaryAction: { triggerPrimaryAction() },
+            toggleEffects: { toggleEffects() }
         ))
     }
 
@@ -83,35 +118,49 @@ struct ContentView: View {
         ZStack {
             if camera.authorization == .authorized {
                 CameraPreviewView(camera: camera)
-                    .overlay(alignment: .topTrailing) {
-                        if !isIdentity(effect) {
-                            ActiveEffectBadge(effect: effect) {
-                                withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
-                                    effect = .normal
-                                    camera.effect = .normal
-                                }
-                            }
+                    .overlay(alignment: .topLeading) {
+                        if !isInCountdown {
+                            FlashModeButton(
+                                mode: Binding(
+                                    get: { camera.flashMode },
+                                    set: { camera.flashMode = $0 }
+                                ),
+                                sceneBrightness: camera.sceneBrightness
+                            )
                             .padding(14)
                         }
                     }
-                    .overlay(alignment: .topLeading) {
-                        if camera.isRecording {
-                            HStack(spacing: 6) {
-                                Circle()
-                                    .fill(.red)
-                                    .frame(width: 8, height: 8)
-                                Text("REC \(Self.timeString(recordingTick))")
-                                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                    .overlay(alignment: .topTrailing) {
+                        VStack(alignment: .trailing, spacing: 8) {
+                            if !isIdentity(effect) {
+                                ActiveEffectBadge(effect: effect) {
+                                    withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
+                                        effect = .normal
+                                        camera.effect = .normal
+                                    }
+                                }
                             }
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(Capsule().fill(.black.opacity(0.6)))
-                            .padding(14)
+                            if camera.isRecording {
+                                HStack(spacing: 6) {
+                                    Circle().fill(.red).frame(width: 8, height: 8)
+                                    Text("REC \(Self.timeString(recordingTick))")
+                                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                                }
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(Capsule().fill(.black.opacity(0.6)))
+                            }
                         }
+                        .padding(14)
                     }
                     .overlay {
                         if busy { ShimmerOverlay() }
+                    }
+                    .overlay(alignment: .bottom) {
+                        if let value = countdownValue {
+                            CountdownOverlay(current: value)
+                        }
                     }
             } else {
                 cameraPlaceholder
@@ -145,9 +194,13 @@ struct ContentView: View {
     private var gallerySection: some View {
         Group {
             if !store.items.isEmpty {
-                PhotoGalleryStrip(store: store)
-                    .frame(height: 108)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                PhotoGalleryStrip(store: store) { item in
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                        viewingID = item.id
+                    }
+                }
+                .frame(height: 108)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
     }
@@ -159,27 +212,17 @@ struct ContentView: View {
                 set: { camera.isMirrored = $0 }
             ))
 
-            FlashModeButton(
+            CaptureModeToggle(
                 mode: Binding(
-                    get: { camera.flashMode },
-                    set: { camera.flashMode = $0 }
+                    get: { captureMode },
+                    set: { captureMode = $0 }
                 ),
-                sceneBrightness: camera.sceneBrightness
+                isLocked: camera.isRecording
             )
 
             Spacer()
 
-            RecordButton(
-                isRecording: camera.isRecording,
-                isDisabled: busy || camera.authorization != .authorized,
-                duration: camera.isRecording ? recordingTick : nil
-            ) {
-                toggleRecording()
-            }
-
-            ShutterButton(isBusy: busy) {
-                takePhoto()
-            }
+            primaryActionButton
 
             Spacer()
 
@@ -210,6 +253,23 @@ struct ContentView: View {
         .background(.black.opacity(0.6))
     }
 
+    /// Single center action button whose role follows the current mode.
+    @ViewBuilder
+    private var primaryActionButton: some View {
+        switch captureMode {
+        case .photo:
+            ShutterButton(isBusy: busy) { triggerPrimaryAction() }
+        case .video:
+            RecordButton(
+                isRecording: camera.isRecording,
+                isDisabled: busy || camera.authorization != .authorized,
+                duration: camera.isRecording ? recordingTick : nil
+            ) {
+                triggerPrimaryAction()
+            }
+        }
+    }
+
     // MARK: - Actions
 
     private func toggleEffects() {
@@ -218,14 +278,46 @@ struct ContentView: View {
         }
     }
 
-    private func takePhoto() {
-        guard !busy, camera.authorization == .authorized else { return }
-        if effect.isAI, !ImageEditService.isAvailable() {
-            showingOnboarding = true
-            return
-        }
-        if camera.isRecording { return }
+    /// Called by the center button, `Space`, or the record pill. Dispatches
+    /// to photo or video depending on the current mode. Countdown is always
+    /// 3s (cancel by tapping again or pressing Esc).
+    private func triggerPrimaryAction() {
+        guard camera.authorization == .authorized else { return }
+        if countdownValue != nil { cancelCountdown(); return }
 
+        switch captureMode {
+        case .photo:
+            if effect.isAI, !ImageEditService.isAvailable() {
+                showingOnboarding = true
+                return
+            }
+            guard !busy else { return }
+            runCountdown(from: 3) { performCapture() }
+
+        case .video:
+            if camera.isRecording {
+                stopRecordingNow()
+            } else {
+                runCountdown(from: 3) { startRecording() }
+            }
+        }
+    }
+
+    private func stopRecordingNow() {
+        recordingTimer?.cancel(); recordingTimer = nil
+        Task {
+            do {
+                let url = try await camera.stopRecording()
+                store.saveVideo(from: url, effect: effect)
+                present(.init(message: "Video saved", kind: .success))
+            } catch {
+                present(.init(message: error.localizedDescription, kind: .error))
+            }
+        }
+    }
+
+    private func performCapture() {
+        guard !busy else { return }
         busy = true
         Task {
             defer { Task { @MainActor in busy = false } }
@@ -281,36 +373,61 @@ struct ContentView: View {
         }
     }
 
-    private func toggleRecording() {
-        guard camera.authorization == .authorized else { return }
-        if camera.isRecording {
-            recordingTimer?.cancel(); recordingTimer = nil
-            Task {
-                do {
-                    let url = try await camera.stopRecording()
-                    store.saveVideo(from: url, effect: effect)
-                    present(.init(message: "Video saved", kind: .success))
-                } catch {
-                    present(.init(message: error.localizedDescription, kind: .error))
-                }
-            }
-        } else {
-            do {
-                try camera.startRecording()
-                recordingStart = Date()
-                recordingTick = 0
-                recordingTimer = Task { @MainActor in
-                    while !Task.isCancelled, camera.isRecording {
-                        try? await Task.sleep(nanoseconds: 250_000_000)
-                        if let start = recordingStart {
-                            recordingTick = Date().timeIntervalSince(start)
-                        }
+    private func startRecording() {
+        do {
+            try camera.startRecording()
+            recordingStart = Date()
+            recordingTick = 0
+            recordingTimer = Task { @MainActor in
+                while !Task.isCancelled, camera.isRecording {
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                    if let start = recordingStart {
+                        recordingTick = Date().timeIntervalSince(start)
                     }
                 }
-            } catch {
-                present(.init(message: error.localizedDescription, kind: .error))
             }
+        } catch {
+            present(.init(message: error.localizedDescription, kind: .error))
         }
+    }
+
+    // MARK: - Countdown
+
+    private func runCountdown(from: Int, then action: @escaping () -> Void) {
+        cancelCountdown()
+        // Show immediately + first tick beep.
+        withAnimation(.spring(response: 0.25, dampingFraction: 0.75)) {
+            countdownValue = from
+        }
+        SoundCue.tick.play()
+
+        countdownTask = Task { @MainActor in
+            for n in stride(from: from - 1, through: 1, by: -1) {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                if Task.isCancelled { return }
+                withAnimation(.spring(response: 0.2, dampingFraction: 0.8)) {
+                    countdownValue = n
+                }
+                SoundCue.tick.play()
+            }
+            // One more second so "1" is actually visible before we flash the
+            // shutter icon and fire.
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            if Task.isCancelled { return }
+            withAnimation(.easeIn(duration: 0.1)) { countdownValue = 0 }
+            SoundCue.shutter.play()
+            try? await Task.sleep(nanoseconds: 180_000_000)
+            if Task.isCancelled { return }
+            withAnimation(.easeOut(duration: 0.2)) { countdownValue = nil }
+            countdownTask = nil
+            action()
+        }
+    }
+
+    private func cancelCountdown() {
+        countdownTask?.cancel()
+        countdownTask = nil
+        withAnimation(.easeOut(duration: 0.15)) { countdownValue = nil }
     }
 
     private func present(_ t: Toast) {
@@ -336,20 +453,16 @@ struct ContentView: View {
 }
 
 private struct KeyShortcuts: View {
-    let takePhoto: () -> Void
+    let primaryAction: () -> Void
     let toggleEffects: () -> Void
-    let toggleRecording: () -> Void
 
     var body: some View {
         ZStack {
-            Button(action: takePhoto) { EmptyView() }
+            Button(action: primaryAction) { EmptyView() }
                 .keyboardShortcut(.space, modifiers: [])
                 .hidden()
             Button(action: toggleEffects) { EmptyView() }
                 .keyboardShortcut("e", modifiers: [])
-                .hidden()
-            Button(action: toggleRecording) { EmptyView() }
-                .keyboardShortcut("r", modifiers: [.command])
                 .hidden()
         }
         .frame(width: 0, height: 0)
