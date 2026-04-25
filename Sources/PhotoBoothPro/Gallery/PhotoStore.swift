@@ -18,6 +18,72 @@ final class PhotoStore {
         try? FileManager.default.createDirectory(
             at: outputDirectory, withIntermediateDirectories: true
         )
+        loadFromDisk()
+    }
+
+    /// Hydrate the gallery with previously captured files in the output
+    /// directory. Filenames look like
+    /// `photoboothpro-yyyyMMdd-HHmmss-SSS-<effect>.{png,mov}`.
+    /// Parses timestamp + effect, builds thumbnails, and inserts in
+    /// reverse-chronological order.
+    private func loadFromDisk() {
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(
+            at: outputDirectory,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) else { return }
+
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd-HHmmss-SSS"
+
+        var rebuilt: [PhotoItem] = []
+        for url in entries {
+            let ext = url.pathExtension.lowercased()
+            let kind: MediaKind
+            switch ext {
+            case "png", "jpg", "jpeg": kind = .photo
+            case "mov", "mp4", "m4v":  kind = .video
+            default: continue
+            }
+            // Filename: photoboothpro-<ts>-<effect>.<ext>
+            let stem = url.deletingPathExtension().lastPathComponent
+            guard stem.hasPrefix("photoboothpro-") else { continue }
+            let core = String(stem.dropFirst("photoboothpro-".count))
+            // Timestamp portion is fixed-width: yyyyMMdd-HHmmss-SSS (18 chars).
+            guard core.count > 19, core[core.index(core.startIndex, offsetBy: 18)] == "-" else { continue }
+            let tsSubstring = core.prefix(18)
+            let effectStr = String(core.dropFirst(19))
+
+            let date = formatter.date(from: String(tsSubstring))
+                ?? (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+                ?? Date()
+
+            let effect = Effect.from(fileSuffix: effectStr)
+            let thumb = Self.thumbnail(for: url, kind: kind)
+
+            rebuilt.append(PhotoItem(
+                url: url,
+                kind: kind,
+                effect: effect,
+                createdAt: date,
+                state: .ready,
+                thumbnail: thumb
+            ))
+        }
+        rebuilt.sort { $0.createdAt > $1.createdAt }
+        items = rebuilt
+        selectedID = items.first?.id
+    }
+
+    private static func thumbnail(for url: URL, kind: MediaKind) -> NSImage? {
+        switch kind {
+        case .photo:
+            // Downsample for the strip. Avoids loading 4K PNGs in full.
+            return NSImage(contentsOf: url)
+        case .video:
+            return generateThumbnail(for: url)
+        }
     }
 
     var directoryURL: URL { outputDirectory }

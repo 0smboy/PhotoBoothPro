@@ -111,7 +111,7 @@ struct MediaViewerView: View {
                 }
             case .video:
                 if let player {
-                    VideoPlayer(player: player)
+                    AVPlayerHostView(player: player)
                         .onAppear { player.play() }
                 } else if let thumb = item.thumbnail {
                     Image(nsImage: thumb)
@@ -242,6 +242,32 @@ struct MediaViewerView: View {
             player = nil
             playerItemID = nil
         }
+    }
+}
+
+// MARK: - AVPlayerView host
+//
+// We deliberately don't use SwiftUI's `VideoPlayer(player:)` here. On
+// macOS 14/15 launching it from inside a `NSViewRepresentable`-heavy
+// hierarchy crashes during AVKit's Swift class-metadata bring-up
+// (`_AVKit_SwiftUI` → `getSuperclassMetadata` → `swift::fatalError` → abort).
+// AVKit's native `AVPlayerView` works reliably and gives us the full
+// macOS controls UI for free.
+
+private struct AVPlayerHostView: NSViewRepresentable {
+    let player: AVPlayer
+
+    func makeNSView(context: Context) -> AVPlayerView {
+        let v = AVPlayerView()
+        v.player = player
+        v.controlsStyle = .floating
+        v.showsFullScreenToggleButton = false
+        v.videoGravity = .resizeAspect
+        return v
+    }
+
+    func updateNSView(_ nsView: AVPlayerView, context: Context) {
+        if nsView.player !== player { nsView.player = player }
     }
 }
 

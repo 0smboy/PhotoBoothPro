@@ -28,8 +28,8 @@ targets:
       properties:
         CFBundleName: PhotoBooth Pro
         CFBundleDisplayName: PhotoBooth Pro
-        CFBundleShortVersionString: "1.2.0"
-        CFBundleVersion: "120"
+        CFBundleShortVersionString: "1.2.1"
+        CFBundleVersion: "121"
         LSMinimumSystemVersion: "14.0"
         NSHighResolutionCapable: true
         NSCameraUsageDescription: "PhotoBooth Pro needs camera access to capture your photos."

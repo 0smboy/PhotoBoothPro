@@ -32,6 +32,14 @@ enum Effect: Equatable, Hashable, Identifiable {
         }
     }
 
+    /// Reverse the `fileSuffix` mapping so we can rebuild a gallery from
+    /// filenames at launch.
+    static func from(fileSuffix raw: String) -> Effect {
+        if let f = LocalFilter(rawValue: raw) { return .local(f) }
+        if let s = AIStyle(rawValue: raw) { return .ai(s) }
+        return .normal
+    }
+
     var accentColor: Color {
         switch self {
         case .local(let f): return f.accentColor

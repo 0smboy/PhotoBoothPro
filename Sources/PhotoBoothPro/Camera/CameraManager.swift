@@ -16,15 +16,13 @@ final class CameraManager: NSObject {
     let session = AVCaptureSession()
 
     // MARK: Outputs
-    private let photoOutput = AVCapturePhotoOutput()
     private let videoDataOutput = AVCaptureVideoDataOutput()
     private let movieOutput = AVCaptureMovieFileOutput()
 
     private let sessionQueue = DispatchQueue(label: "com.photoboothpro.session")
     private let videoQueue  = DispatchQueue(label: "com.photoboothpro.video")
 
-    /// Strong ref to the delegates used by current in-flight operations.
-    private var activePhotoDelegate: PhotoCaptureDelegate?
+    /// Strong ref to the delegate that finalizes a recording.
     private var recordingContinuation: CheckedContinuation<URL, Error>?
 
     // MARK: Published state
@@ -61,6 +59,15 @@ final class CameraManager: NSObject {
     private let lowLightBrightnessThreshold: Double = 0.30
 
     private var brightnessSampleCounter = 0
+
+    /// Most recent raw camera frame (no flash white-out, no filter, no mirror).
+    /// Used by `capturePhoto()` so that stills come from the EXACT same
+    /// pipeline as the live preview and the recorded video — otherwise
+    /// `AVCapturePhotoOutput` runs its own scene-/HDR-/skin-tone enhancement
+    /// path and produces a slightly redder image than the video stream.
+    private var latestRawImage: CIImage?
+    /// Native pixel size of the latest frame, used for naming/orientation.
+    private var latestRawExtent: CGRect = .zero
 
     private let ciContext = CIContext(options: [
         .useSoftwareRenderer: false,
@@ -139,11 +146,12 @@ final class CameraManager: NSObject {
                 }
 
                 // --- Outputs ---
-                if self.session.canAddOutput(self.photoOutput) {
-                    self.session.addOutput(self.photoOutput)
-                    self.photoOutput.maxPhotoQualityPrioritization = .quality
-                }
-
+                // We DON'T attach AVCapturePhotoOutput. Stills are pulled
+                // from the video data output (see `capturePhoto()`) so they
+                // share the live preview / recorded video color path
+                // exactly. Adding photo output also routes through the
+                // ISP's smart-HDR/skin-tone pipeline which produced an
+                // unwanted red shift compared to the video stream.
                 self.videoDataOutput.alwaysDiscardsLateVideoFrames = true
                 self.videoDataOutput.videoSettings = [
                     kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
@@ -155,13 +163,6 @@ final class CameraManager: NSObject {
 
                 if self.session.canAddOutput(self.movieOutput) {
                     self.session.addOutput(self.movieOutput)
-                }
-
-                // Photo output: we burn mirroring in by ourselves on capture.
-                for connection in self.photoOutput.connections
-                where connection.isVideoMirroringSupported {
-                    connection.automaticallyAdjustsVideoMirroring = false
-                    connection.isVideoMirrored = false
                 }
 
                 Task { @MainActor in self.isConfigured = true }
@@ -183,55 +184,83 @@ final class CameraManager: NSObject {
 
     // MARK: Photo capture
 
-    /// Capture a still photo. Returns PNG-encoded data with the current
-    /// filter + mirror baked in.
+    /// Capture a still photo. Returns PNG bytes with the current filter +
+    /// mirror baked in.
+    ///
+    /// Source: the most recent frame from the video data output — the SAME
+    /// pipeline that feeds the live preview and the recorded video. Going
+    /// through `AVCapturePhotoOutput` produced visibly different colors
+    /// (slight red/saturation push on faces) because that path runs its
+    /// own scene/HDR processing on macOS. Using the data-output frame keeps
+    /// preview, photo, and video color-identical.
     func capturePhoto() async throws -> Data {
         guard authorization == .authorized, isConfigured else {
             throw CameraError.notAuthorized
         }
-        let mirror = isMirrored
-        let effectSnapshot = effect
 
-        let rawData: Data = try await withCheckedThrowingContinuation { cont in
-            sessionQueue.async { [weak self] in
-                guard let self else { return }
-                let settings = AVCapturePhotoSettings()
-                settings.photoQualityPrioritization = .quality
-
-                let delegate = PhotoCaptureDelegate(continuation: cont)
-                Task { @MainActor in self.activePhotoDelegate = delegate }
-
-                self.photoOutput.capturePhoto(with: settings, delegate: delegate)
+        // Wait briefly for a fresh frame if for some reason we don't have
+        // one yet (just-launched session, etc.).
+        if latestRawImage == nil {
+            for _ in 0..<20 {
+                try? await Task.sleep(nanoseconds: 50_000_000)
+                if latestRawImage != nil { break }
             }
         }
-        self.activePhotoDelegate = nil
-        return try encodePhoto(rawData: rawData, effect: effectSnapshot, mirror: mirror)
-    }
-
-    /// Apply the current filter + mirror to a raw capture and return PNG bytes.
-    private func encodePhoto(rawData: Data, effect: Effect, mirror: Bool) throws -> Data {
-        guard let source = CGImageSourceCreateWithData(rawData as CFData, nil),
-              let cg = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
-            throw CameraError.invalidImage
+        guard let raw = latestRawImage else {
+            throw CameraError.noPhotoData
         }
 
-        var ci = CIImage(cgImage: cg)
-        ci = effect.apply(to: ci)
+        return try Self.encodePhoto(
+            raw: raw,
+            effect: effect,
+            mirror: isMirrored,
+            ciContext: ciContext
+        )
+    }
+
+    /// Apply effect + mirror to a raw camera CIImage and return PNG bytes.
+    /// Output is tagged with the source image's color space (or sRGB
+    /// fallback) so a viewer interprets it the same as the on-screen preview.
+    private static func encodePhoto(
+        raw: CIImage,
+        effect: Effect,
+        mirror: Bool,
+        ciContext: CIContext
+    ) throws -> Data {
+        var ci = effect.apply(to: raw)
         if mirror {
             let flip = CGAffineTransform(scaleX: -1, y: 1)
                 .translatedBy(x: -ci.extent.width, y: 0)
             ci = ci.transformed(by: flip)
         }
 
-        let renderExtent = ci.extent.integral
-        guard let outCG = ciContext.createCGImage(ci, from: renderExtent) else {
+        let outputCS = raw.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB)!
+        guard let outCG = ciContext.createCGImage(
+            ci,
+            from: ci.extent.integral,
+            format: .RGBA8,
+            colorSpace: outputCS
+        ) else {
             throw CameraError.invalidImage
         }
-        let rep = NSBitmapImageRep(cgImage: outCG)
-        guard let png = rep.representation(using: .png, properties: [:]) else {
+        return try encodeAsPNG(outCG, colorSpace: outputCS)
+    }
+
+    private static func encodeAsPNG(_ image: CGImage, colorSpace: CGColorSpace?) throws -> Data {
+        let mut = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(
+            mut, "public.png" as CFString, 1, nil
+        ) else { throw CameraError.invalidImage }
+
+        var properties: [CFString: Any] = [:]
+        if let cs = colorSpace, let cName = cs.name {
+            properties[kCGImagePropertyProfileName] = cName as String
+        }
+        CGImageDestinationAddImage(dest, image, properties as CFDictionary)
+        guard CGImageDestinationFinalize(dest) else {
             throw CameraError.invalidImage
         }
-        return png
+        return mut as Data
     }
 
     // MARK: Recording
@@ -288,6 +317,14 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
 
         Task { @MainActor [weak self] in
             guard let self else { return }
+
+            // Cache the raw frame for `capturePhoto()`. Note: this is the
+            // unmodified sensor image, even while we're showing white in the
+            // preview — the screen flash lights up the subject for real, and
+            // we want the lit-and-correctly-exposed sensor frame, not the
+            // synthetic white we render to the MTKView.
+            self.latestRawImage = source
+            self.latestRawExtent = source.extent
 
             // Rolling scene-brightness sample (~ every 10 frames). Uses
             // `CIAreaAverage` to produce a single RGBA pixel whose value is
